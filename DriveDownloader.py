@@ -2,8 +2,10 @@ from __future__ import print_function
 import pickle
 import os.path
 import psycopg2
+from psycopg2 import extras
 import io
 import zipfile
+import json
 from configparser import ConfigParser
 from pathlib import Path
 from googleapiclient.http import MediaIoBaseDownload
@@ -31,10 +33,16 @@ def main():
     service = setupDriveCredentials()
     files = getFilesFromGDrive(service)
     for file in files:
-        unzip(file)
-        parse(file)
-        #insertInPostgres()
-    
+        folder = unzip(file)
+        filesList = os.listdir(folder)
+        for file in filesList:
+            data = parseJson(os.path.join(folder, file))
+            if "tripupdates" in file:
+                insertTripUpdatesInDB(data)
+                #print("Inserted " + file + " successfully in database.")
+            elif "vehiclepositions" in file:
+                insertVehiclePositionsInDB(data)
+                print("Inserted " + file + " successfully in database.")
 
 def readConfig(section, filename=CONFIG_FILENAME):
     parser = ConfigParser()
@@ -92,18 +100,13 @@ def downloadFile(service, fileId, fileName):
     filePath = os.path.join(os.getcwd(), "files", fileName)
     print(u'Downloading: {0} ({1})'.format(fileId, fileName))
     fh = None
-    #try:
     request = service.files().get_media(fileId=fileId)
-    fh = io.FileIO(filePath, 'w+b')
-    downloader = MediaIoBaseDownload(fh, request)
-    done = False
-    while done is False:
-        status, done = downloader.next_chunk()
-        print("Download %d%%" % int(status.progress() * 100))
-    #except (Exception) as error:
-    #    print(error)
-    #finally:
-    #    fh.close()
+    with io.FileIO(filePath, 'w+b') as fh:
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while done is False:
+            status, done = downloader.next_chunk()
+            print("Download %d%%" % int(status.progress() * 100))
     return filePath
 
 def unzip(file):
@@ -111,34 +114,66 @@ def unzip(file):
     fileName = os.path.splitext(fileName)[0] # Removes the file extension
     with zipfile.ZipFile(file, 'r') as zip_ref:
         zip_ref.extractall(os.path.join("files", fileName))
-    
+    return os.path.join("files", fileName)
 
-def parse(jsonFile):
-    print("Parsing {0}".format(os.path.basename(jsonFile)))
-    #TODO
+def parseJson(file):
+    print("Parsing {0}".format(os.path.basename(file)))
+    data = None
+    with open(file) as j:
+        data = json.load(j)
+    return data
 
-def insertInPostgres():
+def insertTripUpdatesInDB(jsonData):
+    return 0
+
+def insertVehiclePositionsInDB(jsonData):
     conn = None
-    try:
-        conn = psycopg2.connect(**PostGresConfig)
+    queryVehicle = """
+        INSERT INTO public.vehicle
+            (vehicle_id)
+        VALUES (%s)
+    """
+    queryVehiclePositions = """
+        INSERT INTO public.vehicle_position
+            (vehicle_id, 
+            trip_id, 
+            current_stop_sequence, 
+            current_status, 
+            vehicle_lat, 
+            vehicle_lon, 
+            created_at)
+        VALUES (%s, %s, %s, %s, %s, %s, to_timestamp(%s))
+    """
+    with psycopg2.connect(**PostGresConfig) as conn:
         print('')
-        print('Connected to PostgreSQL database, version:')
-        cur = conn.cursor()
-        cur.execute('SELECT version()')
-        db_version = cur.fetchone()
-        print(db_version)
-        cur.close()
-        
-        # TODO
-        
-        
-    except (Exception, psycopg2.DatabaseError) as error:
-        print(error)
-    finally:
-        if conn is not None:
-            conn.close()
-            print('Database connection closed.')
-    
+        print('Connected to PostgreSQL database')
+        #with conn.cursor() as cur:
+        #    cur.execute('SELECT version()')
+        #    db_version = cur.fetchone()
+        #    print(db_version)
+
+        #args = []
+        for en in jsonData["entity"]:
+            vehicle = en['vehicle']
+            data = (
+                vehicle['vehicle']['id'],
+                vehicle['trip']['tripId'],
+                vehicle['currentStopSequence'], 
+                vehicle['currentStatus'], 
+                vehicle['position']['latitude'], 
+                vehicle['position']['longitude'], 
+                vehicle['timestamp']
+            )
+            with conn.cursor() as cur:
+                cur.execute(queryVehicle, (vehicle['vehicle']['id'],))
+                cur.execute(queryVehiclePositions, data)
+#            args.append(data)
+#        print(args)
+#        with conn.cursor() as cur:
+#            args_str = ','.join(cur.mogrify("(%s,%s,%s,%s,%s,%s,%s)", x) for x in data)
+#            cur.execute(queryVehiclePositions, args)
+#            psycopg2.extras.execute_values(cur, queryVehiclePositions, args, template=None, page_size=100)
+            
 
 if __name__ == '__main__':
     main()
