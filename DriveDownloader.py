@@ -1,11 +1,11 @@
 from __future__ import print_function
 import pickle
 import os.path
-import psycopg2
-from psycopg2 import extras
 import io
 import zipfile
 import json
+import psycopg2
+from psycopg2 import extras
 from configparser import ConfigParser
 from pathlib import Path
 from googleapiclient.http import MediaIoBaseDownload
@@ -24,6 +24,9 @@ SCOPES = ['https://www.googleapis.com/auth/drive.metadata.readonly',
 # This search query enumerates the files in the specified folder
 DRIVE_SEARCH_QUERY = "'{0}' in parents"
 
+
+# To get the credentials.json file, go here https://developers.google.com/drive/api/v3/quickstart/python
+# click the "Enable the Drive API" button and download the file.
 def main():
     global GoogleDriveConfig
     GoogleDriveConfig = readConfig(CONFIG_SECTION_GDRIVE, CONFIG_FILENAME)
@@ -31,6 +34,8 @@ def main():
     PostGresConfig = readConfig(CONFIG_SECTION_POSTGRES, CONFIG_FILENAME)
 
     service = setupDriveCredentials()
+    if not os.path.exists("files"):
+        os.makedirs("files")
     files = getFilesFromGDrive(service)
     for file in files:
         folder = unzip(file)
@@ -39,7 +44,7 @@ def main():
             data = parseJson(os.path.join(folder, file))
             if "tripupdates" in file:
                 insertTripUpdatesInDB(data)
-                #print("Inserted " + file + " successfully in database.")
+                print("Inserted " + file + " successfully in database.")
             elif "vehiclepositions" in file:
                 insertVehiclePositionsInDB(data)
                 print("Inserted " + file + " successfully in database.")
@@ -124,7 +129,52 @@ def parseJson(file):
     return data
 
 def insertTripUpdatesInDB(jsonData):
-    return 0
+    conn = None
+    queryTripUpdate = """
+        INSERT INTO public.trip_update
+            (trip_update_id,
+            trip_id,
+            start_date,
+            route_id
+            createdAt)
+        VALUES (%s, %s, %s, to_timestamp(%s))
+    """
+    queryStopTimeUpdate = """
+        INSERT INTO public.stop_time_update
+            (stop_id, 
+            stop_sequence, 
+            trip_update_id, 
+            departure_time, 
+            arrival_time, 
+            schedule_relationship, 
+            stop_time_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+    """
+    with psycopg2.connect(**PostGresConfig) as conn:
+        print('')
+        print('Connected to PostgreSQL database')
+        for en in jsonData["entity"]:
+            tripUp = en['tripUpdate']
+            paramsTripUpdate = (
+                tripUp['id'],
+                tripUp['trip']['tripId'],
+                tripUp['trip']['startTime'] + ' ' + tripUp['trip']['startDate'],
+                tripUp['trip']['routeId'],
+                tripUp['timestamp']
+            )
+            with conn.cursor() as cur:
+                cur.execute(queryTripUpdate, paramsTripUpdate)
+                for stopTimeUpdate in tripUp["stopTimeUpdate"]:
+                    paramsStopUpdate = (
+                        stopTimeUpdate['stopId'],
+                        stopTimeUpdate['stopSequence'],
+                        tripUp['id'],
+                        stopTimeUpdate['departure']['time'],
+                        stopTimeUpdate['arrival']['time'],
+                        stopTimeUpdate['scheduleRelationship']
+                        #TODO stop_time_id
+                    )
+                    cur.execute(queryStopTimeUpdate, paramsStopUpdate)
 
 def insertVehiclePositionsInDB(jsonData):
     conn = None
