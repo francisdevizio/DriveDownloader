@@ -1,6 +1,6 @@
 # Drive Downloader
 
-Uses the Google Drive API to download a compressed json files from a Google Drive folder, unzipping, parsing, and inserting them in a PostgreSQL DB.
+Uses the Google Drive API to download compressed json files from a Google Drive folder, unzipping, parsing, and inserting them in a PostgreSQL DB.
 
 ## Installing requirements
 
