@@ -1,17 +1,19 @@
 from __future__ import print_function
-import pickle
-import os.path
-import io
-import zipfile
-import json
-import psycopg2
 from psycopg2 import extras
 from configparser import ConfigParser
+from datetime import datetime
+from datetime import timedelta
 from pathlib import Path
 from googleapiclient.http import MediaIoBaseDownload
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
+import psycopg2
+import pickle
+import os.path
+import io
+import zipfile
+import json
 
 CONFIG_FILENAME = "database.ini"
 CONFIG_SECTION_GDRIVE = "googledrive"
@@ -21,8 +23,9 @@ CONFIG_DRIVE_DATAFOLDERID = 'datafolderid'
 # If modifying these scopes, delete the file token.pickle.
 SCOPES = ['https://www.googleapis.com/auth/drive.metadata.readonly',
           'https://www.googleapis.com/auth/drive.readonly']
-# This search query enumerates the files in the specified folder
-DRIVE_SEARCH_QUERY = "'{0}' in parents"
+# This search query enumerates the files in the specified folder {0}
+# that were created after a date {1}
+DRIVE_SEARCH_QUERY = "'{0}' in parents and createdTime > '{1}'"
 
 
 # To get the credentials.json file, go here https://developers.google.com/drive/api/v3/quickstart/python
@@ -84,7 +87,9 @@ def setupDriveCredentials():
     return service
 
 def getFilesFromGDrive(service):
-    query = DRIVE_SEARCH_QUERY.format(GoogleDriveConfig[CONFIG_DRIVE_DATAFOLDERID])
+    dateNow = datetime.now() - timedelta(days=1)
+    tzNow = dateNow.astimezone().isoformat(timespec='seconds')
+    query = DRIVE_SEARCH_QUERY.format(GoogleDriveConfig[CONFIG_DRIVE_DATAFOLDERID], tzNow)
     # Call the Drive v3 API
     results = service.files().list(
         includeTeamDriveItems=True, supportsTeamDrives=True,
@@ -130,14 +135,28 @@ def parseJson(file):
 
 def insertTripUpdatesInDB(jsonData):
     conn = None
+
+    # Get the last trip_update ID in the DB
+    queryGetLastId = """
+        SELECT MAX(trip_update_id) FROM public.trip_update
+    """
+    lastId = 0
+    with psycopg2.connect(**PostGresConfig) as conn:
+        with conn.cursor() as cur:
+            cur.execute(queryGetLastId)
+            lastId = cur.fetchone()[0]
+    if lastId is None:
+        lastId = 0
+    
+    # Insertion queries
     queryTripUpdate = """
         INSERT INTO public.trip_update
             (trip_update_id,
             trip_id,
-            start_date,
-            route_id
-            createdAt)
-        VALUES (%s, %s, %s, to_timestamp(%s))
+            start_time,
+            route_id,
+            created_at)
+        VALUES %s
     """
     queryStopTimeUpdate = """
         INSERT INTO public.stop_time_update
@@ -146,42 +165,68 @@ def insertTripUpdatesInDB(jsonData):
             trip_update_id, 
             departure_time, 
             arrival_time, 
-            schedule_relationship, 
-            stop_time_id)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+            schedule_relationship,
+            created_at)
+        VALUES %s
     """
+
+    # JSON parsing
+    paramsTripUpdate = []
+    paramsStopUpdate = []
+    for en in jsonData["entity"]:
+        tripUp = en['tripUpdate']
+        if tripUp["stopTimeUpdate"][0]['scheduleRelationship'] == 'NO_DATA':
+            print('Skipping trip ' + tripUp['trip']['tripId'] + " because no StopTimeUpdate data was found.")
+            continue
+        lastId += 1
+        tripUpdate = (
+            lastId,
+            tripUp['trip']['tripId'],
+            tripUp['trip']['startDate'] + ' ' + tripUp['trip']['startTime'],
+            tripUp['trip']['routeId'],
+            datetime.utcfromtimestamp(int(tripUp['timestamp']))
+        )
+        paramsTripUpdate.append(tripUpdate)
+        for stopTimeUpdate in tripUp["stopTimeUpdate"]:
+            departureTime = None
+            arrivalTime = None
+            if 'departure' in stopTimeUpdate:
+                departureTime = int(stopTimeUpdate['departure']['time'])
+            else:
+                departureTime = ""
+            if 'arrival' in stopTimeUpdate:
+                arrivalTime = int(stopTimeUpdate['arrival']['time'])
+            else:
+                arrivalTime = ""
+            stopUpdate = (
+                stopTimeUpdate['stopId'],
+                stopTimeUpdate['stopSequence'],
+                lastId,
+                departureTime,
+                arrivalTime,
+                stopTimeUpdate['scheduleRelationship'],
+                datetime.utcfromtimestamp(int(tripUp['timestamp']))
+                #TODO stop_time_id
+            )
+            paramsStopUpdate.append(stopUpdate)
+            
+    # Bulk insertion in database
     with psycopg2.connect(**PostGresConfig) as conn:
         print('')
         print('Connected to PostgreSQL database')
-        for en in jsonData["entity"]:
-            tripUp = en['tripUpdate']
-            paramsTripUpdate = (
-                tripUp['id'],
-                tripUp['trip']['tripId'],
-                tripUp['trip']['startTime'] + ' ' + tripUp['trip']['startDate'],
-                tripUp['trip']['routeId'],
-                tripUp['timestamp']
-            )
-            with conn.cursor() as cur:
-                cur.execute(queryTripUpdate, paramsTripUpdate)
-                for stopTimeUpdate in tripUp["stopTimeUpdate"]:
-                    paramsStopUpdate = (
-                        stopTimeUpdate['stopId'],
-                        stopTimeUpdate['stopSequence'],
-                        tripUp['id'],
-                        stopTimeUpdate['departure']['time'],
-                        stopTimeUpdate['arrival']['time'],
-                        stopTimeUpdate['scheduleRelationship']
-                        #TODO stop_time_id
-                    )
-                    cur.execute(queryStopTimeUpdate, paramsStopUpdate)
+        with conn.cursor() as cur:
+            #cur.execute(queryTripUpdate, paramsTripUpdate)
+            #tripUpdateId = cur.fetchone()[0] # Fetch the ID that is returned by the DB
+            #cur.execute(queryStopTimeUpdate, paramsStopUpdate)
+            psycopg2.extras.execute_values(cur, queryTripUpdate, paramsTripUpdate, page_size=200)
+            psycopg2.extras.execute_values(cur, queryStopTimeUpdate, paramsStopUpdate, page_size=200)
 
 def insertVehiclePositionsInDB(jsonData):
     conn = None
     queryVehicle = """
         INSERT INTO public.vehicle
             (vehicle_id)
-        VALUES (%s)
+        VALUES %s
     """
     queryVehiclePositions = """
         INSERT INTO public.vehicle_position
@@ -192,19 +237,16 @@ def insertVehiclePositionsInDB(jsonData):
             vehicle_lat, 
             vehicle_lon, 
             created_at)
-        VALUES (%s, %s, %s, %s, %s, %s, to_timestamp(%s))
+        VALUES %s
     """
     with psycopg2.connect(**PostGresConfig) as conn:
         print('')
         print('Connected to PostgreSQL database')
-        #with conn.cursor() as cur:
-        #    cur.execute('SELECT version()')
-        #    db_version = cur.fetchone()
-        #    print(db_version)
-
-        #args = []
+        paramsVehicle = []
+        data_list = []
         for en in jsonData["entity"]:
             vehicle = en['vehicle']
+            paramsVehicle.append(vehicle['vehicle']['id'])
             data = (
                 vehicle['vehicle']['id'],
                 vehicle['trip']['tripId'],
@@ -212,17 +254,14 @@ def insertVehiclePositionsInDB(jsonData):
                 vehicle['currentStatus'], 
                 vehicle['position']['latitude'], 
                 vehicle['position']['longitude'], 
-                vehicle['timestamp']
+                datetime.utcfromtimestamp(int(vehicle['timestamp']))
             )
-            with conn.cursor() as cur:
-                cur.execute(queryVehicle, (vehicle['vehicle']['id'],))
-                cur.execute(queryVehiclePositions, data)
-#            args.append(data)
-#        print(args)
-#        with conn.cursor() as cur:
-#            args_str = ','.join(cur.mogrify("(%s,%s,%s,%s,%s,%s,%s)", x) for x in data)
-#            cur.execute(queryVehiclePositions, args)
-#            psycopg2.extras.execute_values(cur, queryVehiclePositions, args, template=None, page_size=100)
+        data_list.append(data)
+        with conn.cursor() as cur:
+            #cur.execute(queryVehicle, (vehicle['vehicle']['id'],))
+            #cur.execute(queryVehiclePositions, data)
+            psycopg2.extras.execute_values(cur, queryVehicle, paramsVehicle, page_size=200)
+            psycopg2.extras.execute_values(cur, queryVehiclePositions, data_list, page_size=200)
             
 
 if __name__ == '__main__':
