@@ -179,25 +179,30 @@ def insertTripUpdatesInDB(jsonData):
             print('Skipping trip ' + tripUp['trip']['tripId'] + " because no StopTimeUpdate data was found.")
             continue
         lastId += 1
+        timestamp = None
+        if 'timestamp' in tripUp:
+            timestamp = datetime.utcfromtimestamp(int(tripUp['timestamp']))
+        else:
+            timestamp = None
         tripUpdate = (
             lastId,
             tripUp['trip']['tripId'],
             tripUp['trip']['startDate'] + ' ' + tripUp['trip']['startTime'],
             tripUp['trip']['routeId'],
-            datetime.utcfromtimestamp(int(tripUp['timestamp']))
+            timestamp
         )
         paramsTripUpdate.append(tripUpdate)
         for stopTimeUpdate in tripUp["stopTimeUpdate"]:
             departureTime = None
             arrivalTime = None
             if 'departure' in stopTimeUpdate:
-                departureTime = int(stopTimeUpdate['departure']['time'])
+                departureTime = datetime.utcfromtimestamp(int(stopTimeUpdate['departure']['time']))
             else:
-                departureTime = ""
+                departureTime = None
             if 'arrival' in stopTimeUpdate:
-                arrivalTime = int(stopTimeUpdate['arrival']['time'])
+                arrivalTime = datetime.utcfromtimestamp(int(stopTimeUpdate['arrival']['time']))
             else:
-                arrivalTime = ""
+                arrivalTime = None
             stopUpdate = (
                 stopTimeUpdate['stopId'],
                 stopTimeUpdate['stopSequence'],
@@ -205,7 +210,7 @@ def insertTripUpdatesInDB(jsonData):
                 departureTime,
                 arrivalTime,
                 stopTimeUpdate['scheduleRelationship'],
-                datetime.utcfromtimestamp(int(tripUp['timestamp']))
+                timestamp
                 #TODO stop_time_id
             )
             paramsStopUpdate.append(stopUpdate)
@@ -223,11 +228,12 @@ def insertTripUpdatesInDB(jsonData):
 
 def insertVehiclePositionsInDB(jsonData):
     conn = None
-    queryVehicle = """
-        INSERT INTO public.vehicle
-            (vehicle_id)
-        VALUES %s
-    """
+    #queryVehicle = """
+    #    INSERT INTO public.vehicle
+    #        (vehicle_id)
+    #    VALUES %s
+    #    ON CONFLICT DO NOTHING
+    #"""
     queryVehiclePositions = """
         INSERT INTO public.vehicle_position
             (vehicle_id, 
@@ -244,7 +250,7 @@ def insertVehiclePositionsInDB(jsonData):
         print('Connected to PostgreSQL database')
         paramsVehicle = []
         data_list = []
-        for en in jsonData["entity"]:
+        for en in jsonData["entity"]: 
             vehicle = en['vehicle']
             paramsVehicle.append(vehicle['vehicle']['id'])
             data = (
@@ -256,11 +262,9 @@ def insertVehiclePositionsInDB(jsonData):
                 vehicle['position']['longitude'], 
                 datetime.utcfromtimestamp(int(vehicle['timestamp']))
             )
-        data_list.append(data)
+            data_list.append(data)
         with conn.cursor() as cur:
-            #cur.execute(queryVehicle, (vehicle['vehicle']['id'],))
-            #cur.execute(queryVehiclePositions, data)
-            psycopg2.extras.execute_values(cur, queryVehicle, paramsVehicle, page_size=200)
+            #psycopg2.extras.execute_values(cur, queryVehicle, paramsVehicle, page_size=200)
             psycopg2.extras.execute_values(cur, queryVehiclePositions, data_list, page_size=200)
             
 
