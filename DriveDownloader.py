@@ -8,6 +8,7 @@ from googleapiclient.http import MediaIoBaseDownload
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
+from multiprocessing.pool import ThreadPool
 import psycopg2
 import pickle
 import os.path
@@ -26,10 +27,9 @@ SCOPES = ['https://www.googleapis.com/auth/drive.metadata.readonly',
 # This search query enumerates the files in the specified folder {0}
 # that were created after a date {1}
 DRIVE_SEARCH_QUERY = "'{0}' in parents and createdTime > '{1}'"
+DOWNLOAD_PAGE_SIZE = 5
 
 
-# To get the credentials.json file, go here https://developers.google.com/drive/api/v3/quickstart/python
-# click the "Enable the Drive API" button and download the file.
 def main():
     global GoogleDriveConfig
     GoogleDriveConfig = readConfig(CONFIG_SECTION_GDRIVE, CONFIG_FILENAME)
@@ -39,18 +39,23 @@ def main():
     service = setupDriveCredentials()
     if not os.path.exists("files"):
         os.makedirs("files")
-    files = getFilesFromGDrive(service)
-    for file in files:
-        folder = unzip(file)
-        filesList = os.listdir(folder)
-        for file in filesList:
-            data = parseJson(os.path.join(folder, file))
-            if "tripupdates" in file:
-                insertTripUpdatesInDB(data)
-                print("Inserted " + file + " successfully in database.")
-            elif "vehiclepositions" in file:
-                insertVehiclePositionsInDB(data)
-                print("Inserted " + file + " successfully in database.")
+    
+    # Build the GDrive query parameter
+    dateNow = datetime.now() - timedelta(days=1)
+    tzNow = dateNow.astimezone().isoformat(timespec='seconds')
+    query = DRIVE_SEARCH_QUERY.format(GoogleDriveConfig[CONFIG_DRIVE_DATAFOLDERID], tzNow)
+
+    filesLeft = True
+    nextPageToken = None
+    while (filesLeft):
+        result = getFilesFromGDrive(query, service, nextPageToken)
+        nextPageToken = result[0]
+        print(nextPageToken)
+        if (nextPageToken is None):
+            filesLeft = False
+        zips = result[1]
+        for zip in zips:
+            processZip(zip)
 
 def readConfig(section, filename=CONFIG_FILENAME):
     parser = ConfigParser()
@@ -77,8 +82,7 @@ def setupDriveCredentials():
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                'credentials.json', SCOPES)
+            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
             creds = flow.run_local_server()
         # Save the credentials for the next run
         with open('token.pickle', 'wb') as token:
@@ -86,16 +90,14 @@ def setupDriveCredentials():
     service = build('drive', 'v3', credentials=creds)
     return service
 
-def getFilesFromGDrive(service):
-    dateNow = datetime.now() - timedelta(days=1)
-    tzNow = dateNow.astimezone().isoformat(timespec='seconds')
-    query = DRIVE_SEARCH_QUERY.format(GoogleDriveConfig[CONFIG_DRIVE_DATAFOLDERID], tzNow)
+def getFilesFromGDrive(query, service, nextPageToken=None):
     # Call the Drive v3 API
     results = service.files().list(
-        includeTeamDriveItems=True, supportsTeamDrives=True,
+        includeTeamDriveItems=True, supportsTeamDrives=True, pageToken=nextPageToken,
         corpora="teamDrive",teamDriveId=GoogleDriveConfig[CONFIG_DRIVE_TEAMDRIVEID], 
-        q=query, pageSize=2,
+        q=query, pageSize=DOWNLOAD_PAGE_SIZE,
         fields="nextPageToken, files(id, name)").execute()
+    pToken = results.get('nextPageToken', None)
     items = results.get('files', [])
     fileList = []
     if not items:
@@ -104,7 +106,7 @@ def getFilesFromGDrive(service):
         print('Files:')
         for item in items:
             fileList.append(downloadFile(service, item['id'], item['name'].replace(":", "-")))
-    return fileList
+    return (pToken, fileList)
 
 def downloadFile(service, fileId, fileName):
     filePath = os.path.join(os.getcwd(), "files", fileName)
@@ -118,6 +120,18 @@ def downloadFile(service, fileId, fileName):
             status, done = downloader.next_chunk()
             print("Download %d%%" % int(status.progress() * 100))
     return filePath
+
+def processZip(zip):
+    folder = unzip(zip)
+    filesList = os.listdir(folder)
+    for file in filesList:
+        data = parseJson(os.path.join(folder, file))
+        if "tripupdates" in file:
+            insertTripUpdatesInDB(data)
+            print("Inserted " + file + " successfully in database.")
+        elif "vehiclepositions" in file:
+            insertVehiclePositionsInDB(data)
+            print("Inserted " + file + " successfully in database.")
 
 def unzip(file):
     fileName = os.path.basename(file) # Gets the file name
@@ -176,7 +190,7 @@ def insertTripUpdatesInDB(jsonData):
     for en in jsonData["entity"]:
         tripUp = en['tripUpdate']
         if tripUp["stopTimeUpdate"][0]['scheduleRelationship'] == 'NO_DATA':
-            print('Skipping trip ' + tripUp['trip']['tripId'] + " because no StopTimeUpdate data was found.")
+            #print('Skipping trip ' + tripUp['trip']['tripId'] + " because no StopTimeUpdate data was found.")
             continue
         lastId += 1
         timestamp = None
