@@ -8,7 +8,8 @@ from googleapiclient.http import MediaIoBaseDownload
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
-from multiprocessing.pool import ThreadPool
+from collections import deque # Double-ended queue
+from threading import Thread
 import psycopg2
 import pickle
 import os.path
@@ -28,7 +29,7 @@ SCOPES = ['https://www.googleapis.com/auth/drive.metadata.readonly',
 # that were created after a date {1}
 DRIVE_SEARCH_QUERY = "'{0}' in parents and createdTime > '{1}'"
 DOWNLOAD_PAGE_SIZE = 5
-
+#MAX_THREADS = 5
 
 def main():
     global GoogleDriveConfig
@@ -40,7 +41,7 @@ def main():
     if not os.path.exists("files"):
         os.makedirs("files")
     
-    # Build the GDrive query parameter
+    # Build the GDrive query parameter. It needs to be the exact same between paged queries.
     dateNow = datetime.now() - timedelta(days=1)
     tzNow = dateNow.astimezone().isoformat(timespec='seconds')
     query = DRIVE_SEARCH_QUERY.format(GoogleDriveConfig[CONFIG_DRIVE_DATAFOLDERID], tzNow)
@@ -56,6 +57,19 @@ def main():
         zips = result[1]
         for zip in zips:
             processZip(zip)
+        
+        #q = deque(zips)
+        #for i in range(MAX_THREADS):
+        #    worker = Thread(target=doWork, args=(q,))
+        #    worker.daemon = True
+        #    worker.start()
+
+# Worker function. Each thread processes one zip.
+#def doWork(q):
+#    while True:
+#        zip = q.popleft()
+#        processZip(zip)
+#        q.task_done()
 
 def readConfig(section, filename=CONFIG_FILENAME):
     parser = ConfigParser()
@@ -127,11 +141,12 @@ def processZip(zip):
     for file in filesList:
         data = parseJson(os.path.join(folder, file))
         if "tripupdates" in file:
-            insertTripUpdatesInDB(data)
-            print("Inserted " + file + " successfully in database.")
+            success = insertTripUpdatesInDB(data)
+            if (success): print("Inserted " + file + " successfully in database.")
         elif "vehiclepositions" in file:
-            insertVehiclePositionsInDB(data)
-            print("Inserted " + file + " successfully in database.")
+            success = insertVehiclePositionsInDB(data)
+            if (success): print("Inserted " + file + " successfully in database.")
+        print('')
 
 def unzip(file):
     fileName = os.path.basename(file) # Gets the file name
@@ -148,8 +163,9 @@ def parseJson(file):
     return data
 
 def insertTripUpdatesInDB(jsonData):
+    if "entity" not in jsonData:
+        return False
     conn = None
-
     # Get the last trip_update ID in the DB
     queryGetLastId = """
         SELECT MAX(trip_update_id) FROM public.trip_update
@@ -239,8 +255,12 @@ def insertTripUpdatesInDB(jsonData):
             #cur.execute(queryStopTimeUpdate, paramsStopUpdate)
             psycopg2.extras.execute_values(cur, queryTripUpdate, paramsTripUpdate, page_size=200)
             psycopg2.extras.execute_values(cur, queryStopTimeUpdate, paramsStopUpdate, page_size=200)
+            return True
+    return False
 
 def insertVehiclePositionsInDB(jsonData):
+    if "entity" not in jsonData:
+        return False
     conn = None
     #queryVehicle = """
     #    INSERT INTO public.vehicle
@@ -280,7 +300,8 @@ def insertVehiclePositionsInDB(jsonData):
         with conn.cursor() as cur:
             #psycopg2.extras.execute_values(cur, queryVehicle, paramsVehicle, page_size=200)
             psycopg2.extras.execute_values(cur, queryVehiclePositions, data_list, page_size=200)
-            
+            return True
+    return False
 
 if __name__ == '__main__':
     main()
