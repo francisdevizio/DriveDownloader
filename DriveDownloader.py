@@ -8,7 +8,7 @@ from googleapiclient.http import MediaIoBaseDownload
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
-from collections import deque # Double-ended queue
+from queue import Queue
 from threading import Thread
 import psycopg2
 import pickle
@@ -28,7 +28,7 @@ SCOPES = ['https://www.googleapis.com/auth/drive.metadata.readonly',
 # This search query enumerates the files in the specified folder {0}
 # that were created after a date {1}
 DRIVE_SEARCH_QUERY = "'{0}' in parents and createdTime > '{1}'"
-DOWNLOAD_PAGE_SIZE = 5
+DOWNLOAD_PAGE_SIZE = 4
 #MAX_THREADS = 5
 
 def main():
@@ -41,35 +41,42 @@ def main():
     if not os.path.exists("files"):
         os.makedirs("files")
     
-    # Build the GDrive query parameter. It needs to be the exact same between paged queries.
+    # Building the GDrive query parameter first because
+    # it needs to be the exact same between paged queries.
     dateNow = datetime.now() - timedelta(days=1)
     tzNow = dateNow.astimezone().isoformat(timespec='seconds')
     query = DRIVE_SEARCH_QUERY.format(GoogleDriveConfig[CONFIG_DRIVE_DATAFOLDERID], tzNow)
 
     filesLeft = True
     nextPageToken = None
+    q = Queue()
     while (filesLeft):
         result = getFilesFromGDrive(query, service, nextPageToken)
         nextPageToken = result[0]
-        print(nextPageToken)
         if (nextPageToken is None):
             filesLeft = False
         zips = result[1]
+        
+    ### Single-thread solution
         for zip in zips:
             processZip(zip)
         
-        #q = deque(zips)
+    ### Multithreaded solution
+        #for zip in zips:
+        #    q.put(zip)
         #for i in range(MAX_THREADS):
-        #    worker = Thread(target=doWork, args=(q,))
-        #    worker.daemon = True
-        #    worker.start()
+        #   worker = Thread(target=doWork, args=(q,))
+        #   worker.daemon = True
+        #   worker.start()
+    #q.join()
+    print('All done.')
 
-# Worker function. Each thread processes one zip.
+### Worker function
 #def doWork(q):
-#    while True:
-#        zip = q.popleft()
-#        processZip(zip)
-#        q.task_done()
+#  while True:
+#      zip = q.get()
+#      processZip(zip)
+#      q.task_done()
 
 def readConfig(section, filename=CONFIG_FILENAME):
     parser = ConfigParser()
@@ -109,7 +116,7 @@ def getFilesFromGDrive(query, service, nextPageToken=None):
     results = service.files().list(
         includeTeamDriveItems=True, supportsTeamDrives=True, pageToken=nextPageToken,
         corpora="teamDrive",teamDriveId=GoogleDriveConfig[CONFIG_DRIVE_TEAMDRIVEID], 
-        q=query, pageSize=DOWNLOAD_PAGE_SIZE,
+        q=query, pageSize=DOWNLOAD_PAGE_SIZE, orderBy='createdTime',
         fields="nextPageToken, files(id, name)").execute()
     pToken = results.get('nextPageToken', None)
     items = results.get('files', [])
@@ -117,7 +124,6 @@ def getFilesFromGDrive(query, service, nextPageToken=None):
     if not items:
         print('No files found.')
     else:
-        print('Files:')
         for item in items:
             fileList.append(downloadFile(service, item['id'], item['name'].replace(":", "-")))
     return (pToken, fileList)
@@ -146,7 +152,7 @@ def processZip(zip):
         elif "vehiclepositions" in file:
             success = insertVehiclePositionsInDB(data)
             if (success): print("Inserted " + file + " successfully in database.")
-        print('')
+    print('')
 
 def unzip(file):
     fileName = os.path.basename(file) # Gets the file name
@@ -247,13 +253,14 @@ def insertTripUpdatesInDB(jsonData):
             
     # Bulk insertion in database
     with psycopg2.connect(**PostGresConfig) as conn:
-        print('')
-        print('Connected to PostgreSQL database')
+        
         with conn.cursor() as cur:
             #cur.execute(queryTripUpdate, paramsTripUpdate)
             #tripUpdateId = cur.fetchone()[0] # Fetch the ID that is returned by the DB
             #cur.execute(queryStopTimeUpdate, paramsStopUpdate)
+            print('Inserting TripUpdate...')
             psycopg2.extras.execute_values(cur, queryTripUpdate, paramsTripUpdate, page_size=200)
+            print('Inserting StopTimeUpdate...')
             psycopg2.extras.execute_values(cur, queryStopTimeUpdate, paramsStopUpdate, page_size=200)
             return True
     return False
@@ -280,8 +287,6 @@ def insertVehiclePositionsInDB(jsonData):
         VALUES %s
     """
     with psycopg2.connect(**PostGresConfig) as conn:
-        print('')
-        print('Connected to PostgreSQL database')
         paramsVehicle = []
         data_list = []
         for en in jsonData["entity"]: 
@@ -299,6 +304,7 @@ def insertVehiclePositionsInDB(jsonData):
             data_list.append(data)
         with conn.cursor() as cur:
             #psycopg2.extras.execute_values(cur, queryVehicle, paramsVehicle, page_size=200)
+            print('Inserting VehiclePositions...')
             psycopg2.extras.execute_values(cur, queryVehiclePositions, data_list, page_size=200)
             return True
     return False
