@@ -49,7 +49,7 @@ def main():
 
     filesLeft = True
     nextPageToken = None
-    q = Queue()
+    #q = Queue()
     while (filesLeft):
         result = getFilesFromGDrive(query, service, nextPageToken)
         nextPageToken = result[0]
@@ -69,7 +69,7 @@ def main():
         #   worker.daemon = True
         #   worker.start()
     #q.join()
-    print('All done.')
+    print("Job's done.")
 
 ### Worker function
 #def doWork(q):
@@ -143,6 +143,7 @@ def downloadFile(service, fileId, fileName):
 
 def processZip(zip):
     folder = unzip(zip)
+    os.remove(zip)
     filesList = os.listdir(folder)
     for file in filesList:
         data = parseJson(os.path.join(folder, file))
@@ -152,6 +153,9 @@ def processZip(zip):
         elif "vehiclepositions" in file:
             success = insertVehiclePositionsInDB(data)
             if (success): print("Inserted " + file + " successfully in database.")
+        os.remove(os.path.join(folder, file))
+        if len(os.listdir(folder)) == 0:
+            os.rmdir(folder)
     print('')
 
 def unzip(file):
